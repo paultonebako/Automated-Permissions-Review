@@ -1,0 +1,94 @@
+# Define the groups that you want to review for high privileges
+$highPrivGroups = @("Domain Admins", "Enterprise Admins", "Schema Admins", "Administrators")
+
+# Define the output CSV file path
+$outputFile = "C:\ADPermissionsReview.csv"
+$logFile = "C:\ADPermissionsReviewLog.txt"
+$backupFile = "C:\ADBackup.ldif"
+
+# Set thresholds for password age, inactivity, and lockout policy
+$maxPasswordAgeDays = 90
+$maxInactivityDays = 60
+$accountLockoutThreshold = 3 # Example: 3 failed login attempts
+
+# Create an empty array to store the results
+$results = @()
+
+# Log the start time
+$startTime = Get-Date
+Add-Content $logFile "Permissions review started at $startTime`r`n"
+
+# Backup the AD state before review
+Add-Content $logFile "Backing up AD state..."
+Get-ADUser -Filter * -Properties * | Export-Clixml -Path $backupFile
+Add-Content $logFile "AD backup completed. Backup stored at $backupFile`r`n"
+
+# Loop through each high privilege group
+foreach ($group in $highPrivGroups) {
+    # Get the group object
+    $groupObject = Get-ADGroup -Identity $group
+
+    # Get the members of the group, including nested members across domains
+    $groupMembers = Get-ADGroupMember -Identity $groupObject -Recursive
+
+    # Loop through each group member
+    foreach ($member in $groupMembers) {
+        # Only process users (skip groups and other objects)
+        if ($member.objectClass -eq "user") {
+            # Get the user details
+            $user = Get-ADUser -Identity $member.SamAccountName -Properties DisplayName, EmailAddress, Department, Title, PasswordLastSet, AccountExpirationDate, Enabled, PasswordNeverExpires, LastLogonDate, LockedOut
+
+            # Create a result object
+            $result = New-Object PSObject
+            $result | Add-Member -MemberType NoteProperty -Name "Group" -Value $group
+            $result | Add-Member -MemberType NoteProperty -Name "UserName" -Value $user.SamAccountName
+            $result | Add-Member -MemberType NoteProperty -Name "DisplayName" -Value $user.DisplayName
+            $result | Add-Member -MemberType NoteProperty -Name "Email" -Value $user.EmailAddress
+            $result | Add-Member -MemberType NoteProperty -Name "Department" -Value $user.Department
+            $result | Add-Member -MemberType NoteProperty -Name "Title" -Value $user.Title
+            $result | Add-Member -MemberType NoteProperty -Name "PasswordLastSet" -Value $user.PasswordLastSet
+            $result | Add-Member -MemberType NoteProperty -Name "AccountExpirationDate" -Value $user.AccountExpirationDate
+            $result | Add-Member -MemberType NoteProperty -Name "Enabled" -Value $user.Enabled
+            $result | Add-Member -MemberType NoteProperty -Name "PasswordNeverExpires" -Value $user.PasswordNeverExpires
+            $result | Add-Member -MemberType NoteProperty -Name "LastLogonDate" -Value $user.LastLogonDate
+            $result | Add-Member -MemberType NoteProperty -Name "LockedOut" -Value $user.LockedOut
+
+            # Check if the password is too old
+            if ($user.PasswordLastSet -lt (Get-Date).AddDays(-$maxPasswordAgeDays)) {
+                $result | Add-Member -MemberType NoteProperty -Name "PasswordStatus" -Value "Password Expired"
+            } else {
+                $result | Add-Member -MemberType NoteProperty -Name "PasswordStatus" -Value "Password OK"
+            }
+
+            # Check if the account is inactive
+            if ($user.LastLogonDate -lt (Get-Date).AddDays(-$maxInactivityDays)) {
+                $result | Add-Member -MemberType NoteProperty -Name "InactivityStatus" -Value "Account Inactive"
+            } else {
+                $result | Add-Member -MemberType NoteProperty -Name "InactivityStatus" -Value "Account Active"
+            }
+
+            # Check if the account is locked out
+            if ($user.LockedOut -eq $true) {
+                $result | Add-Member -MemberType NoteProperty -Name "LockoutStatus" -Value "Account Locked Out"
+            } else {
+                $result | Add-Member -MemberType NoteProperty -Name "LockoutStatus" -Value "Not Locked Out"
+            }
+
+            # Add the result to the array
+            $results += $result
+
+            # Log the user review
+            $logEntry = "Reviewed $($user.SamAccountName) in group $group"
+            Add-Content $logFile $logEntry
+        }
+    }
+}
+
+# Export the results to a CSV file
+$results | Export-Csv -Path $outputFile -NoTypeInformation
+
+# Log the end time
+$endTime = Get-Date
+Add-Content $logFile "`r`nPermissions review completed at $endTime. Results exported to $outputFile`r`n"
+
+Write-Host "Permissions review completed. Results exported to $outputFile and logged to $logFile"
